@@ -1,21 +1,11 @@
 {
-  "name": "roadguard-g2-standalone",
+  "name": "glass-car-dash-backend",
   "version": "0.2.0",
   "private": true,
   "type": "module",
+  "description": "ADB-driven media remote (play/pause/next/previous) for the Glass Car Dash G2 app",
   "scripts": {
-    "dev": "vite --host 0.0.0.0",
-    "build": "vite build",
-    "pack": "evenhub pack app.json dist -o roadguard-g2.ehpk",
-    "simulate": "evenhub-simulator http://localhost:5173",
-    "test": "node --test"
-  },
-  "dependencies": {
-    "@evenrealities/even_hub_sdk": "^0.0.12"
-  },
-  "devDependencies": {
-    "@evenrealities/evenhub-cli": "^0.1.14",
-    "@evenrealities/evenhub-simulator": "^0.7.2",
-    "vite": "^5.4.0"
+    "dev": "node --env-file=.env server.js",
+    "start": "node server.js"
   }
 }

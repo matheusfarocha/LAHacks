@@ -1,0 +1,29 @@
+{
+  "package_id": "com.usman.glassdashv13",
+  "edition": "202601",
+  "name": "Glass Car Dash",
+  "tagline": "Speed, limit, camera warnings, media — tap to play/pause, swipe to skip",
+  "description": "A driving dashboard for the Even Realities G2: current speed, local speed limit shown as a circular road-sign graphic, heading, current road name, speed camera proximity, glasses + phone battery, and now-playing track, alongside a media remote (tap to play/pause, scroll up for next track, scroll down for previous track, double-tap to exit). Media control is driven by your phone's own ADB (wireless debugging), routed through a Termux backend — no media-app-specific integration needed, it works with whatever's currently playing. Speed/limit data comes directly from your phone's GPS and the OSM Overpass API.",
+  "author": "Usman Kayani",
+  "version": "0.5.0",
+  "min_app_version": "2.0.0",
+  "min_sdk_version": "0.0.10",
+  "entrypoint": "index.html",
+  "permissions": [
+    {
+      "name": "location",
+      "desc": "Shows your current speed and heading, and looks up the local speed limit for your position."
+    },
+    {
+      "name": "network",
+      "desc": "Sends play/pause/skip commands to your own Glass Car Dash backend, and looks up speed limits and speed cameras from the OSM Overpass API (with two mirrors as fallback if the primary is rate-limited).",
+      "whitelist": [
+        "http://127.0.0.1:8790",
+        "https://overpass-api.de",
+        "https://maps.mail.ru",
+        "https://overpass.osm.ch"
+      ]
+    }
+  ],
+  "supported_languages": ["en"]
+}
