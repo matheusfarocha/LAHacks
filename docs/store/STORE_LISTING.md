@@ -1,3 +1,3 @@
 # Glass Car Dash
 
-Live MPH speed and downward head-nod break reminders. Automatic pose learning with tolerance for small movement and gradual reference adjustment. Counts downward pitch-and-return nods with a 750 ms pause per nod. Pose setup messages are phone-only; glasses show speed or a break alert. Tap to dismiss; double-tap to exit. A motion heuristic, not a validated drowsiness detector. Browser previews use labeled simulated speed and motion.
+Live MPH speed and microsleep head-nod break reminders. Automatic pose learning and gradual reference adjustment. Counts the slow forward droop and quick snap back of a microsleep nod, and ignores talking, deliberate nods, glances, bumps and hard braking. Pose setup messages are phone-only; glasses show speed or a break alert. Tap to dismiss; double-tap to exit. A motion heuristic, not a validated drowsiness detector. Browser previews use labeled simulated speed and motion.

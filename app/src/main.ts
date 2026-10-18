@@ -1,6 +1,8 @@
 import { Runtime } from './even'
 import { createSpeedFilter } from './speed'
-import { HeadNodDetector, NOD_COOLDOWN_MS, type MotionSample } from './drowsiness'
+import { HeadNodDetector, NOD_WINDOW_MS, toMotionSample, type MotionSample, type NodAlert } from './drowsiness'
+
+const AXIS_KEY = 'glass-car-dash:pitch-axis'
 
 const runtime = new Runtime()
 const filterSpeed = createSpeedFilter()
@@ -9,10 +11,12 @@ let speedMph: number | null = null
 let rendering = false
 let pending = false
 let stopped = false
-let alert = false
+let alert: NodAlert | null = null
 let demoAlert = false
 let motionEnabled = false
 let lastMotionAt = 0
+let lastRaw: MotionSample | null = null
+let lastGpsSpeed: { mps: number; at: number } | null = null
 let staleTimer: ReturnType<typeof setTimeout> | undefined
 let statusTimer: ReturnType<typeof setInterval> | undefined
 let retryTimer: ReturnType<typeof setTimeout> | undefined
@@ -35,41 +39,52 @@ async function paint(): Promise<void> {
   }
 }
 
+function describeLastEvent(current: ReturnType<HeadNodDetector['feedback']>): string {
+  const event = current.lastEvent
+  if (!event || Date.now() - event.at > NOD_WINDOW_MS) return ''
+  const shape = event.dropMs || event.riseMs ? ', down ' + event.dropMs + 'ms / up ' + event.riseMs + 'ms' : ''
+  return ' Last droop (' + Math.round(event.depthDeg) + '°' + shape + '): '
+    + (event.counted ? 'counted.' : 'ignored, ' + event.reason + '.')
+}
+
 function updateMotionStatus() {
   if (stopped) return
   const current = detector.feedback()
   const fresh = lastMotionAt > 0 && Date.now() - lastMotionAt <= 5000
   const ready = current.calibrated && fresh
   runtime.setMotionFeedback(ready ? current.angle : null, ready ? current.nods : null)
-  runtime.setCalibrationControls(motionEnabled && fresh)
+  runtime.setCalibrationControls(motionEnabled && fresh, motionEnabled && ready && current.phase !== 'teaching')
+  runtime.setDiagnostics(!motionEnabled ? '' : 'Sensor ' + current.sampleRateHz.toFixed(1) + ' Hz'
+    + (lastRaw ? ' · raw x ' + lastRaw.x.toFixed(2) + ' y ' + lastRaw.y.toFixed(2) + ' z ' + lastRaw.z.toFixed(2) : ' · no samples yet')
+    + ' · ' + current.phase)
   if (alert) {
-    runtime.setMotionStatus(demoAlert ? 'Alert preview · dismiss to return to speed.' : 'Repeated head movement detected. Take a break. Tap the glasses or Dismiss alert to acknowledge.')
+    runtime.setMotionStatus(demoAlert ? 'Alert preview · dismiss to return to speed.'
+      : alert === 'head-down' ? 'Head stayed down. Wake up. The warning stays until the glasses are tapped or Dismiss alert is pressed.'
+      : 'Microsleep nods detected. Take a break. Tap the glasses or Dismiss alert to acknowledge.')
   } else if (!motionEnabled) {
     return
-
   } else if (!fresh) {
     runtime.setMotionStatus('Waiting for head-motion samples. Automatic alerts are paused.')
   } else if (!current.signalValid) {
-    runtime.setMotionStatus('Waiting for a stable, nonzero motion signal. Automatic alerts are paused.')
-  } else if (!current.calibrated) {
-    runtime.setMotionStatus('Learning normal pose · ' + current.countdownSeconds + 's. Small movements are OK; large movements restart learning.')
-
-  } else if (current.nodCooldownMs > 0) {
-    runtime.setMotionStatus('Nod counted · waiting ' + (current.nodCooldownMs / 1000).toFixed(1) + 's before another nod can count.')
+    runtime.setMotionStatus('Head-motion readings are invalid. Automatic alerts are paused.')
+  } else if (current.phase === 'learning') {
+    runtime.setMotionStatus('Learning normal pose · hold your head naturally for ' + current.countdownSeconds + 's.')
+  } else if (current.phase === 'teaching') {
+    runtime.setMotionStatus('Teaching nod direction · look down (chin toward chest) and hold still for a second.')
+  } else if (current.disturbed) {
+    runtime.setMotionStatus('Bump or hard braking/acceleration · nods paused for a moment.' + describeLastEvent(current))
+  } else if (current.headDownMs > 0) {
+    runtime.setMotionStatus('Head down · ' + (current.headDownMs / 1000).toFixed(1) + 's. Lift it or the wake-up warning shows.')
   } else if (current.poseJustReset) {
-    runtime.setMotionStatus('Pose reset automatically · monitoring from your new posture.')
-  } else if (current.postureCountdownSeconds != null) {
-    runtime.setMotionStatus('New steady posture · resetting reference in ' + current.postureCountdownSeconds + 's. Small movements are OK.')
-  } else if (!current.settled) {
-    runtime.setMotionStatus('Learning your changed posture automatically. Keep a comfortable, fairly steady position.')
+    runtime.setMotionStatus('New steady posture adopted · monitoring from here.')
   } else {
-    runtime.setMotionStatus('Pose set · downward nods only · ' + NOD_COOLDOWN_MS + 'ms pause per nod · gradual pose adjustment active.')
+    runtime.setMotionStatus('Watching for microsleep nods.' + describeLastEvent(current))
   }
 }
 
-function showAlert(preview = false) {
+function showAlert(kind: NodAlert, preview = false) {
   if (stopped || alert) return
-  alert = true
+  alert = kind
   demoAlert = preview
   updateMotionStatus()
   void paint()
@@ -78,7 +93,7 @@ function showAlert(preview = false) {
 function dismissAlert() {
   if (!alert) return
   detector.reset()
-  alert = false
+  alert = null
   demoAlert = false
   updateMotionStatus()
   void paint()
@@ -86,6 +101,12 @@ function dismissAlert() {
 
 function onSpeed(speedMps: number | null) {
   if (stopped) return
+  const now = Date.now()
+  const valid = speedMps != null && Number.isFinite(speedMps) && speedMps >= 0
+  if (valid && lastGpsSpeed && now - lastGpsSpeed.at >= 300 && now - lastGpsSpeed.at <= 5000) {
+    detector.noteVehicleAcceleration((speedMps - lastGpsSpeed.mps) / ((now - lastGpsSpeed.at) / 1000), now)
+  }
+  lastGpsSpeed = valid ? { mps: speedMps, at: now } : null
   clearTimeout(staleTimer)
   speedMph = filterSpeed(speedMps)
   void paint()
@@ -95,11 +116,19 @@ function onSpeed(speedMps: number | null) {
   }, 10_000)
 }
 
-function onMotion(sample: MotionSample) {
+function onMotion(raw: unknown) {
   if (stopped) return
   lastMotionAt = Date.now()
+  const sample = toMotionSample(raw)
+  if (sample) lastRaw = sample
   if (alert) return
-  if (detector.update(sample, lastMotionAt)) showAlert()
+  const detected = detector.update(sample, lastMotionAt)
+  if (detected) showAlert(detected)
+  const axis = detector.takeLearnedAxis()
+  if (axis) {
+    try { localStorage.setItem(AXIS_KEY, JSON.stringify(axis)) } catch {}
+    updateMotionStatus()
+  }
   const feedback = detector.feedback()
   runtime.setMotionFeedback(feedback.calibrated ? feedback.angle : null, feedback.calibrated ? feedback.nods : null)
 }
@@ -108,6 +137,19 @@ function relearnPose() {
   if (stopped || !motionEnabled) return
   detector.relearn()
   updateMotionStatus()
+}
+
+function teachDirection() {
+  if (stopped || !motionEnabled) return
+  detector.teachDownDirection()
+  updateMotionStatus()
+}
+
+function restoreAxis() {
+  try {
+    const saved = localStorage.getItem(AXIS_KEY)
+    if (saved) detector.setPitchAxis(JSON.parse(saved))
+  } catch {}
 }
 
 function cleanup() {
@@ -119,11 +161,13 @@ function cleanup() {
 }
 
 async function main() {
+  restoreAxis()
   runtime.onExit(cleanup)
   runtime.onTap(dismissAlert)
   runtime.onMotion(onMotion)
   runtime.onCalibrate(relearnPose)
-  runtime.onTestAlert(() => showAlert(true))
+  runtime.onTeachDirection(teachDirection)
+  runtime.onTestAlert(() => showAlert('nods', true))
   runtime.onAcknowledge(dismissAlert)
   await runtime.connect()
   await paint()
