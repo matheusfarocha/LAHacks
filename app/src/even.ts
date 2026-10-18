@@ -1,3 +1,4 @@
+import { startAlarm, stopAlarm } from './alarm'
 import {
   waitForEvenAppBridge,
   CreateStartUpPageContainer,
@@ -160,6 +161,8 @@ export class Runtime {
 
   async render(speedMph: number | null, alert = false): Promise<void> {
     if (this.exited) return
+    if (alert) startAlarm()
+    else stopAlarm()
     const text = speedMph == null ? '—' : String(Math.round(speedMph))
     const key = alert ? 'head-nod-alert' : text
     if (key === this.lastSpeed) return
