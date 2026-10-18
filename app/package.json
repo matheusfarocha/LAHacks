@@ -12,7 +12,8 @@
     "test": "node --experimental-strip-types test.mts"
   },
   "dependencies": {
-    "@evenrealities/even_hub_sdk": "^0.0.11"
+    "@evenrealities/even_hub_sdk": "^0.0.11",
+    "maplibre-gl": "^6.14.0"
   },
   "devDependencies": {
     "@evenrealities/evenhub-cli": "^0.1.13",

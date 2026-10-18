@@ -1,11 +1,21 @@
 import { Runtime } from './even'
 import { createSpeedFilter } from './speed'
 import { HeadNodDetector, averageMotion, type MotionSample } from './drowsiness'
+import { DEFAULT_NAVIGATION, type NavigationInstruction } from './navigation'
+import { findDestination, getDrivingRoute, type Destination } from './openmap'
+import { RouteTracker, type LocationFix, type RouteProgress } from './route'
 
 const runtime = new Runtime()
 const filterSpeed = createSpeedFilter()
 const detector = new HeadNodDetector()
 let speedMph: number | null = null
+let headingDegrees: number | null = null
+let navigation: NavigationInstruction = DEFAULT_NAVIGATION
+let lastFix: LocationFix | null = null
+let routeTracker: RouteTracker | null = null
+let activeDestination: Destination | null = null
+let routeAbort: AbortController | null = null
+let lastRerouteAt = 0
 let rendering = false
 let pending = false
 let stopped = false
@@ -22,6 +32,7 @@ let staleTimer: ReturnType<typeof setTimeout> | undefined
 let calibrationTimer: ReturnType<typeof setTimeout> | undefined
 let statusTimer: ReturnType<typeof setInterval> | undefined
 let retryTimer: ReturnType<typeof setTimeout> | undefined
+let arrivalTimer: ReturnType<typeof setTimeout> | undefined
 
 async function paint(): Promise<void> {
   pending = true
@@ -30,7 +41,7 @@ async function paint(): Promise<void> {
   try {
     while (pending && !stopped) {
       pending = false
-      await runtime.render(speedMph, alert)
+      await runtime.render(speedMph, alert, navigation, headingDegrees)
     }
   } catch (error) {
     runtime.showError(error instanceof Error ? error.message : 'Unable to update the display.')
@@ -78,15 +89,116 @@ function dismissAlert() {
   void paint()
 }
 
-function onSpeed(speedMps: number | null) {
+function onLocation(fix: LocationFix) {
   if (stopped) return
   clearTimeout(staleTimer)
-  speedMph = filterSpeed(speedMps)
+  const firstFix = lastFix == null
+  lastFix = fix
+  runtime.updateMapLocation(fix)
+  speedMph = filterSpeed(fix.speedMps, fix.timestamp)
+  if (fix.headingDegrees != null) headingDegrees = fix.headingDegrees
+  if (routeTracker) updateRouteProgress(routeTracker.update(fix))
+  else if (firstFix) runtime.setNavigationStatus(`GPS ready (±${Math.round(fix.accuracy)} m) · enter a destination.`)
   void paint()
   staleTimer = setTimeout(() => {
     speedMph = filterSpeed(null)
+    if (routeTracker) runtime.setNavigationStatus('GPS signal lost · holding the last route instruction.')
     void paint()
   }, 10_000)
+}
+
+function updateRouteProgress(progress: RouteProgress) {
+  navigation = progress.instruction
+  if (progress.arrived) {
+    const destinationName = activeDestination?.name ?? 'destination'
+    routeTracker = null
+    runtime.setNavigationStatus(`Arrived at ${destinationName}.`)
+    clearTimeout(arrivalTimer)
+    arrivalTimer = setTimeout(() => {
+      navigation = DEFAULT_NAVIGATION
+      activeDestination = null
+      runtime.clearMapRoute()
+      runtime.setNavigationStatus('GPS ready · enter a destination to start navigation.')
+      void paint()
+    }, 4000)
+    return
+  }
+  const milesRemaining = progress.distanceRemainingMeters / 1609.344
+  const minutesRemaining = Math.max(1, Math.round(progress.durationRemainingSeconds / 60))
+  runtime.setNavigationStatus(`${milesRemaining.toFixed(milesRemaining < 10 ? 1 : 0)} mi remaining · about ${minutesRemaining} min.`)
+  if (routeTracker?.shouldReroute(progress) && Date.now() - lastRerouteAt >= 15_000) void reroute()
+}
+
+async function startNavigation(query: string) {
+  const destinationQuery = query.trim()
+  if (destinationQuery.length < 2) {
+    runtime.setNavigationStatus('Enter an address or place name.')
+    return
+  }
+  if (!lastFix) {
+    runtime.setNavigationStatus('Requesting a fresh GPS fix…')
+    try {
+      onLocation(await runtime.requestCurrentLocation())
+    } catch (error) {
+      runtime.setNavigationStatus(error instanceof Error ? `GPS unavailable: ${error.message}` : 'Unable to get a GPS fix.')
+      return
+    }
+  }
+  if (!lastFix) return
+  routeAbort?.abort()
+  routeAbort = new AbortController()
+  const signal = routeAbort.signal
+  runtime.setNavigationStatus('Finding destination…')
+  try {
+    const destination = await findDestination(destinationQuery, lastFix, signal)
+    runtime.setNavigationStatus(`Calculating an OpenStreetMap driving route to ${destination.name}…`)
+    const route = await getDrivingRoute(lastFix, destination, signal)
+    if (signal.aborted || !lastFix) return
+    activeDestination = destination
+    routeTracker = new RouteTracker(route)
+    runtime.showMapRoute(route.geometry, destination.coordinates)
+    lastRerouteAt = Date.now()
+    updateRouteProgress(routeTracker.update(lastFix))
+    void paint()
+  } catch (error) {
+    if ((error as Error).name !== 'AbortError') {
+      runtime.setNavigationStatus(error instanceof Error ? error.message : 'Unable to start navigation.')
+    }
+  }
+}
+
+function stopNavigation() {
+  routeAbort?.abort()
+  routeAbort = null
+  routeTracker = null
+  activeDestination = null
+  navigation = DEFAULT_NAVIGATION
+  runtime.clearMapRoute()
+  clearTimeout(arrivalTimer)
+  runtime.setNavigationStatus('Navigation stopped · live GPS remains active.')
+  void paint()
+}
+
+async function reroute() {
+  if (!lastFix || !activeDestination || !routeTracker) return
+  lastRerouteAt = Date.now()
+  routeAbort?.abort()
+  routeAbort = new AbortController()
+  const signal = routeAbort.signal
+  const destination = activeDestination
+  runtime.setNavigationStatus('Off route · calculating a new route…')
+  try {
+    const route = await getDrivingRoute(lastFix, destination, signal)
+    if (signal.aborted || !lastFix || activeDestination !== destination) return
+    routeTracker = new RouteTracker(route)
+    runtime.showMapRoute(route.geometry, destination.coordinates)
+    updateRouteProgress(routeTracker.update(lastFix))
+    void paint()
+  } catch (error) {
+    if ((error as Error).name !== 'AbortError') {
+      runtime.setNavigationStatus('Reroute failed · continuing with the current route.')
+    }
+  }
 }
 
 function onMotion(sample: MotionSample) {
@@ -142,10 +254,12 @@ function capturePose(pose: 'neutral' | 'down') {
 
 function cleanup() {
   stopped = true
+  routeAbort?.abort()
   clearTimeout(staleTimer)
   clearTimeout(calibrationTimer)
   clearInterval(statusTimer)
   clearTimeout(retryTimer)
+  clearTimeout(arrivalTimer)
   void runtime.exit().catch(() => {})
 }
 
@@ -156,10 +270,12 @@ async function main() {
   runtime.onCalibrate(capturePose)
   runtime.onTestAlert(() => showAlert(true))
   runtime.onAcknowledge(dismissAlert)
+  runtime.onStartNavigation((destination) => void startNavigation(destination))
+  runtime.onStopNavigation(stopNavigation)
   await runtime.connect()
   await paint()
   await Promise.all([
-    runtime.startSpeedUpdates(onSpeed).catch((error: unknown) => {
+    runtime.startLocationUpdates(onLocation).catch((error: unknown) => {
       runtime.showError(error instanceof Error ? error.message : 'GPS unavailable.')
     }),
     runtime.startMotionUpdates().then((enabled) => {

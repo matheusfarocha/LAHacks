@@ -8,16 +8,26 @@ import {
   AppLocationAccuracy,
   StartUpPageCreateResult,
   ImuReportPace,
+  type AppLocation,
   type EvenAppBridge,
 } from '@evenrealities/even_hub_sdk'
 import type { MotionSample } from './drowsiness'
+import {
+  DEFAULT_NAVIGATION,
+  formatCompassHeading,
+  formatNavigationDistance,
+  shouldShowManeuver,
+  type Maneuver,
+  type NavigationInstruction,
+} from './navigation'
+import type { LocationFix } from './route'
+import { MobileNavigationMap } from './mobile-map'
 import mockupUrl from '../../docs/mockups/amg-silverline.png?url'
 
 const TILE_W = 200
 const TILE_H = 100
 const WIDTH = TILE_W * 2
 const HEIGHT = TILE_H * 2
-const GAUGE_SCALE = 0.75
 const LEFT = (576 - WIDTH) / 2
 const TOP = 84
 
@@ -29,9 +39,8 @@ export class Runtime {
   private error = document.createElement('p')
   private exitHandler: () => void = () => {}
   private unsubscribeLocation: (() => void) | undefined
-  private previewTimer: ReturnType<typeof setInterval> | undefined
   private exited = false
-  private lastSpeed: string | undefined
+  private lastFrame: string | undefined
   private motionHandler: (sample: MotionSample) => void = () => {}
   private tapHandler: () => void = () => {}
   private unsubscribeEvents: (() => void) | undefined
@@ -42,6 +51,10 @@ export class Runtime {
   private testAlertHandler: () => void = () => {}
   private acknowledgeHandler: () => void = () => {}
   private warning = document.createElement('canvas')
+  private startNavigationHandler: (destination: string) => void = () => {}
+  private stopNavigationHandler: () => void = () => {}
+  private navigationStatus = document.createElement('p')
+  private mobileMap: MobileNavigationMap | null = null
 
   async connect(): Promise<void> {
     this.setupPreview()
@@ -87,6 +100,8 @@ export class Runtime {
   onCalibrate(handler: (pose: 'neutral' | 'down') => void) { this.calibrationHandler = handler }
   onTestAlert(handler: () => void) { this.testAlertHandler = handler }
   onAcknowledge(handler: () => void) { this.acknowledgeHandler = handler }
+  onStartNavigation(handler: (destination: string) => void) { this.startNavigationHandler = handler }
+  onStopNavigation(handler: () => void) { this.stopNavigationHandler = handler }
 
   async startMotionUpdates(): Promise<boolean> {
     if (!this.bridge || this.exited) return false
@@ -99,6 +114,12 @@ export class Runtime {
   }
 
   setMotionStatus(message: string) { this.motionStatus.textContent = message }
+  setNavigationStatus(message: string) { this.navigationStatus.textContent = message }
+  updateMapLocation(fix: LocationFix) { this.mobileMap?.updateLocation(fix) }
+  showMapRoute(coordinates: [number, number][], destination: [number, number]) {
+    this.mobileMap?.showRoute(coordinates, destination)
+  }
+  clearMapRoute() { this.mobileMap?.clearRoute() }
 
   setCalibrationControls(enabled: boolean, canCaptureDown: boolean) {
     this.neutralButton.disabled = !enabled
@@ -144,19 +165,25 @@ export class Runtime {
     warningCtx.putImageData(warningPixels, 0, 0)
   }
 
-  async render(speedMph: number | null, alert = false): Promise<void> {
+  async render(
+    speedMph: number | null,
+    alert = false,
+    navigation = DEFAULT_NAVIGATION,
+    headingDegrees: number | null = null,
+  ): Promise<void> {
     if (this.exited) return
     const text = speedMph == null ? '—' : String(Math.round(speedMph))
-    const key = alert ? 'head-nod-alert' : text
-    if (key === this.lastSpeed) return
+    const key = alert ? 'head-nod-alert' : `${text}|${navigation.maneuver}|${navigation.distanceMiles}|${navigation.streetName}|${headingDegrees}`
+    if (key === this.lastFrame) return
     const ctx = this.canvas.getContext('2d')!
     ctx.clearRect(0, 0, WIDTH, HEIGHT)
     if (alert) {
       this.drawAlert(ctx)
     } else {
       ctx.save()
-      ctx.translate(WIDTH * (1 - GAUGE_SCALE) / 2, HEIGHT * (1 - GAUGE_SCALE) / 2)
-      ctx.scale(GAUGE_SCALE, GAUGE_SCALE)
+      const speedScale = 0.6
+      ctx.translate(0, 34)
+      ctx.scale(speedScale, speedScale)
       ctx.drawImage(this.gauge, 0, 0)
       ctx.fillStyle = '#78df6c'
       ctx.textAlign = 'center'
@@ -166,8 +193,11 @@ export class Runtime {
       ctx.font = '500 21px -apple-system, BlinkMacSystemFont, Arial, sans-serif'
       ctx.fillText('MPH', WIDTH / 2, 155)
       ctx.restore()
+      this.drawNavigation(ctx, navigation, headingDegrees)
     }
-    this.canvas.setAttribute('aria-label', alert ? 'Take a break. Head nod detected. Tap to dismiss.' : speedMph == null ? 'Waiting for GPS speed' : text + ' MPH')
+    this.canvas.setAttribute('aria-label', alert
+      ? 'Take a break. Head nod detected. Tap to dismiss.'
+      : `${speedMph == null ? 'Waiting for GPS speed' : `${text} MPH`}. ${navigation.streetName}.${shouldShowManeuver(navigation.distanceMiles) ? ` ${formatNavigationDistance(navigation.distanceMiles)} to the maneuver.` : ''}`)
 
     if (this.bridge) {
       for (let index = 0; index < 4; index++) {
@@ -197,7 +227,7 @@ export class Runtime {
         if (String(result) !== 'success') throw new Error('Display transfer failed. Retrying…')
       }
     }
-    this.lastSpeed = key
+    this.lastFrame = key
     this.showError('')
   }
 
@@ -219,20 +249,120 @@ export class Runtime {
     ctx.fillText('Tap to dismiss', WIDTH / 2, 181)
   }
 
-  async startSpeedUpdates(onSpeed: (speedMps: number | null) => void): Promise<void> {
+  private drawNavigation(
+    ctx: CanvasRenderingContext2D,
+    instruction: NavigationInstruction,
+    headingDegrees: number | null,
+  ) {
+    const green = '#91f27b'
+    ctx.strokeStyle = green
+    ctx.fillStyle = green
+    ctx.lineWidth = 4
+    ctx.lineCap = 'round'
+    ctx.lineJoin = 'round'
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'middle'
+    if (shouldShowManeuver(instruction.distanceMiles)) {
+      // The scaled arrow's top aligns with the top of the speedometer arcs.
+      this.drawManeuverArrow(ctx, instruction.maneuver, 321, 60)
+      ctx.font = '700 27px -apple-system, BlinkMacSystemFont, Arial, sans-serif'
+      ctx.fillText(formatNavigationDistance(instruction.distanceMiles), 321, 116, 145)
+    } else {
+      this.drawCompass(ctx, headingDegrees, 321, 82)
+    }
+    ctx.font = '600 15px -apple-system, BlinkMacSystemFont, Arial, sans-serif'
+    ctx.fillText(instruction.streetName.toUpperCase(), 321, 164, 145)
+  }
+
+  private drawCompass(ctx: CanvasRenderingContext2D, headingDegrees: number | null, x: number, y: number) {
+    ctx.font = '600 23px -apple-system, BlinkMacSystemFont, Arial, sans-serif'
+    ctx.fillText(formatCompassHeading(headingDegrees), x - 17, y, 55)
+    ctx.save()
+    ctx.translate(x + 29, y)
+    ctx.rotate(((headingDegrees ?? 0) * Math.PI) / 180)
+    ctx.beginPath()
+    ctx.moveTo(0, -13)
+    ctx.lineTo(9, 11)
+    ctx.lineTo(0, 7)
+    ctx.lineTo(-9, 11)
+    ctx.closePath()
+    ctx.fill()
+    ctx.restore()
+  }
+
+  private drawManeuverArrow(ctx: CanvasRenderingContext2D, maneuver: Maneuver, x: number, y: number) {
+    ctx.save()
+    ctx.translate(x, y)
+    ctx.scale(0.7, 0.7)
+    if (maneuver === 'arrive') {
+      ctx.lineWidth = 4
+      ctx.strokeRect(-23, -21, 46, 42)
+      ctx.beginPath()
+      ctx.moveTo(-23, -21); ctx.lineTo(23, 21)
+      ctx.moveTo(23, -21); ctx.lineTo(-23, 21)
+      ctx.stroke()
+      ctx.restore()
+      return
+    }
+    if (maneuver === 'roundabout') {
+      ctx.beginPath()
+      ctx.arc(0, 0, 22, Math.PI * 0.2, Math.PI * 1.85)
+      ctx.stroke()
+      ctx.beginPath()
+      ctx.moveTo(14, -25); ctx.lineTo(25, -18); ctx.lineTo(14, -10)
+      ctx.stroke()
+      ctx.restore()
+      return
+    }
+    const mirror = maneuver.includes('left') ? -1 : 1
+    ctx.scale(mirror, 1)
+    ctx.beginPath()
+    if (maneuver === 'straight') {
+      ctx.moveTo(0, 26); ctx.lineTo(0, -25)
+    } else if (maneuver === 'u-turn') {
+      ctx.moveTo(18, 27); ctx.lineTo(18, -5); ctx.quadraticCurveTo(18, -27, 0, -27); ctx.quadraticCurveTo(-18, -27, -18, -5)
+    } else if (maneuver.startsWith('slight')) {
+      ctx.moveTo(-17, 27); ctx.lineTo(-17, 4); ctx.lineTo(17, -25)
+    } else {
+      ctx.moveTo(-18, 27); ctx.lineTo(-18, 0); ctx.quadraticCurveTo(-18, -19, 1, -19); ctx.lineTo(23, -19)
+    }
+    ctx.stroke()
+    ctx.beginPath()
+    if (maneuver === 'straight') {
+      ctx.moveTo(-11, -14); ctx.lineTo(0, -27); ctx.lineTo(11, -14)
+    } else if (maneuver === 'u-turn') {
+      ctx.moveTo(-8, 4); ctx.lineTo(-18, -7); ctx.lineTo(-28, 4)
+    } else if (maneuver.startsWith('slight')) {
+      ctx.moveTo(3, -25); ctx.lineTo(19, -27); ctx.lineTo(17, -10)
+    } else {
+      ctx.moveTo(12, -29); ctx.lineTo(24, -19); ctx.lineTo(12, -9)
+    }
+    ctx.stroke()
+    ctx.restore()
+  }
+
+  async startLocationUpdates(onLocation: (fix: LocationFix) => void): Promise<void> {
     if (this.exited) return
     if (!this.bridge) {
-      let time = 0
-      onSpeed(8)
-      this.previewTimer = setInterval(() => {
-        time += 0.16
-        onSpeed(8 + Math.sin(time) * 6)
-      }, 1000)
+      if (!navigator.geolocation) throw new Error('This browser does not provide GPS location.')
+      const watchId = navigator.geolocation.watchPosition(
+        (position) => {
+          if (!this.exited) onLocation(this.browserLocationFix(position))
+        },
+        (error) => {
+          this.showError(`GPS unavailable: ${error.message}`)
+          this.setNavigationStatus(`GPS unavailable: ${error.message}`)
+        },
+        // Desktop browsers often have Wi-Fi/network location but no GPS radio.
+        // The native G2 path below still requests high-accuracy phone GPS.
+        { enableHighAccuracy: false, maximumAge: 60_000, timeout: 30_000 },
+      )
+      this.unsubscribeLocation = () => navigator.geolocation.clearWatch(watchId)
       return
     }
     // Subscribe before starting so the first GPS fix cannot be missed.
     this.unsubscribeLocation = this.bridge.onAppLocationChanged((location) => {
-      if (!this.exited) onSpeed(typeof location.speed === 'number' ? location.speed : null)
+      if (!this.exited) onLocation(this.appLocationFix(location))
     })
     const started = await this.bridge.startAppLocationUpdates({
       accuracy: AppLocationAccuracy.High,
@@ -241,11 +371,61 @@ export class Runtime {
     })
     if (!started) throw new Error('Location unavailable. Allow location access for the Even app, then reopen this app.')
     // A double-tap can arrive while the native start request is in flight.
-    if (this.exited) this.stopSpeedUpdates()
+    if (this.exited) this.stopLocationUpdates()
   }
 
-  stopSpeedUpdates() {
-    clearInterval(this.previewTimer)
+  async requestCurrentLocation(): Promise<LocationFix> {
+    if (this.exited) throw new Error('The display has already closed.')
+    if (this.bridge) {
+      const location = await this.bridge.getAppLocation({ accuracy: AppLocationAccuracy.High, timeoutMs: 15_000 })
+      if (!location) throw new Error('The Even app did not return a location. Confirm Precise Location is enabled.')
+      return this.appLocationFix(location)
+    }
+    if (!navigator.geolocation) throw new Error('This browser does not provide location services.')
+    const request = (options: PositionOptions) => new Promise<GeolocationPosition>((resolve, reject) => {
+      navigator.geolocation.getCurrentPosition(resolve, reject, options)
+    })
+    try {
+      return this.browserLocationFix(await request({ enableHighAccuracy: true, maximumAge: 60_000, timeout: 10_000 }))
+    } catch (error) {
+      const geolocationError = error as GeolocationPositionError
+      if (geolocationError.code === geolocationError.PERMISSION_DENIED) {
+        throw new Error(geolocationError.message || 'Location permission was denied.')
+      }
+      try {
+        return this.browserLocationFix(await request({ enableHighAccuracy: false, maximumAge: 300_000, timeout: 20_000 }))
+      } catch (fallbackError) {
+        const message = (fallbackError as GeolocationPositionError).message
+        throw new Error(message || 'No GPS or network location fix is available on this computer.')
+      }
+    }
+  }
+
+  private browserLocationFix(position: GeolocationPosition): LocationFix {
+    return {
+      latitude: position.coords.latitude,
+      longitude: position.coords.longitude,
+      accuracy: position.coords.accuracy,
+      speedMps: Number.isFinite(position.coords.speed) ? position.coords.speed : null,
+      headingDegrees: Number.isFinite(position.coords.heading) ? position.coords.heading : null,
+      timestamp: position.timestamp,
+    }
+  }
+
+  private appLocationFix(location: AppLocation): LocationFix {
+    return {
+      latitude: location.latitude,
+      longitude: location.longitude,
+      accuracy: typeof location.accuracy === 'number' ? location.accuracy : 50,
+      speedMps: typeof location.speed === 'number' ? location.speed : null,
+      headingDegrees: typeof location.heading === 'number' ? location.heading : null,
+      timestamp: typeof location.timestamp === 'number'
+        ? location.timestamp < 1_000_000_000_000 ? location.timestamp * 1000 : location.timestamp
+        : Date.now(),
+    }
+  }
+
+  stopLocationUpdates() {
     this.unsubscribeLocation?.()
     this.unsubscribeLocation = undefined
     if (this.bridge) void this.bridge.stopAppLocationUpdates().catch(() => {})
@@ -253,7 +433,7 @@ export class Runtime {
 
   async exit(): Promise<void> {
     this.exited = true
-    this.stopSpeedUpdates()
+    this.stopLocationUpdates()
     this.unsubscribeEvents?.()
     if (this.bridge) {
       await this.bridge.imuControl(false).catch(() => {})
@@ -272,7 +452,7 @@ export class Runtime {
     display.append(this.canvas)
     const hint = document.createElement('p')
     const hasHost = typeof (window as any).flutter_inappwebview?.callHandler === 'function'
-    hint.textContent = hasHost ? 'Live GPS speed · double-tap to exit' : 'Simulated speed · browser preview'
+    hint.textContent = hasHost ? 'Live phone GPS navigation · double-tap to exit' : 'Live browser GPS preview'
     hint.style.cssText = 'color:#888;font:12px system-ui;margin:0'
     const controls = document.createElement('section')
     controls.style.cssText = 'width:min(576px,100%);padding:16px;box-sizing:border-box;border:1px solid #333;border-radius:8px;display:flex;flex-direction:column;gap:12px;text-align:left'
@@ -298,10 +478,79 @@ export class Runtime {
     styleButton(document.createElement('button'), 'Dismiss alert', () => this.acknowledgeHandler())
     this.setCalibrationControls(false, false)
     controls.append(title, note, this.motionStatus, buttons)
-    document.getElementById('app')!.replaceChildren(display, hint, this.error, controls)
+    const navigationControls = this.createNavigationControls()
+    const { section: mapSection, container: mapContainer, recenter } = this.createPhoneMap()
+    document.getElementById('app')!.replaceChildren(display, hint, this.error, navigationControls, mapSection, controls)
     document.getElementById('app')!.style.height = 'auto'
     document.getElementById('app')!.style.minHeight = '100%'
     this.error.setAttribute('role', 'status')
+    try {
+      this.mobileMap = new MobileNavigationMap(mapContainer)
+      recenter.onclick = () => this.mobileMap?.recenter()
+      requestAnimationFrame(() => this.mobileMap?.resize())
+    } catch (error) {
+      mapContainer.textContent = error instanceof Error ? `Map unavailable: ${error.message}` : 'Map unavailable.'
+    }
+  }
+
+  private createPhoneMap() {
+    const section = document.createElement('section')
+    section.style.cssText = 'width:min(576px,100%);padding:16px;box-sizing:border-box;border:1px solid #333;border-radius:8px;display:flex;flex-direction:column;gap:10px;text-align:left'
+    const header = document.createElement('div')
+    header.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:12px'
+    const title = document.createElement('strong')
+    title.textContent = 'Live route map'
+    const recenter = document.createElement('button')
+    recenter.type = 'button'
+    recenter.textContent = 'Recenter'
+    recenter.style.cssText = 'padding:7px 10px;border:1px solid #555;border-radius:6px;background:#242424;color:#ddd;cursor:pointer'
+    header.append(title, recenter)
+    const container = document.createElement('div')
+    container.setAttribute('aria-label', 'OpenFreeMap navigation map')
+    container.style.cssText = 'position:relative;width:100%;height:320px;overflow:hidden;border-radius:8px;background:#171717'
+    const attribution = document.createElement('p')
+    attribution.style.cssText = 'margin:0;color:#888;font:11px/1.4 system-ui'
+    attribution.textContent = 'OpenFreeMap · OpenStreetMap data · OSRM routing'
+    section.append(header, container, attribution)
+    return { section, container, recenter }
+  }
+
+  private createNavigationControls() {
+    const section = document.createElement('section')
+    section.style.cssText = 'width:min(576px,100%);padding:16px;box-sizing:border-box;border:1px solid #333;border-radius:8px;display:flex;flex-direction:column;gap:10px;text-align:left'
+    const title = document.createElement('strong')
+    title.textContent = 'GPS navigation'
+    const note = document.createElement('p')
+    note.textContent = 'Enter an address or place. Keyless OpenStreetMap routing advances each turn from live phone GPS and reroutes after a sustained deviation.'
+    note.style.cssText = 'margin:0;color:#aaa;font:13px/1.5 system-ui'
+    const form = document.createElement('form')
+    form.style.cssText = 'display:grid;grid-template-columns:1fr auto auto;gap:8px'
+    const destination = document.createElement('input')
+    destination.type = 'search'
+    destination.placeholder = 'Address or destination'
+    destination.autocomplete = 'street-address'
+    destination.setAttribute('aria-label', 'Destination')
+    destination.style.cssText = 'box-sizing:border-box;width:100%;min-width:0;padding:9px;border:1px solid #555;border-radius:6px;background:#181818;color:#ddd'
+    const button = (label: string, type: 'submit' | 'button') => {
+      const element = document.createElement('button')
+      element.type = type
+      element.textContent = label
+      element.style.cssText = 'padding:9px 12px;border:1px solid #555;border-radius:6px;background:#242424;color:#ddd;cursor:pointer'
+      return element
+    }
+    const start = button('Start', 'submit')
+    const stop = button('Stop', 'button')
+    form.onsubmit = (event) => {
+      event.preventDefault()
+      this.startNavigationHandler(destination.value)
+    }
+    stop.onclick = () => this.stopNavigationHandler()
+    form.append(destination, start, stop)
+    this.navigationStatus.style.cssText = 'margin:0;color:#9ce78b;font:13px/1.5 system-ui'
+    this.navigationStatus.setAttribute('role', 'status')
+    this.navigationStatus.textContent = 'Waiting for a live GPS fix…'
+    section.append(title, note, form, this.navigationStatus)
+    return section
   }
 
   showError(message: string) {

@@ -1,6 +1,77 @@
 import assert from 'node:assert/strict'
 import { createSpeedFilter } from './src/speed.ts'
 import { HeadNodDetector, averageMotion } from './src/drowsiness.ts'
+import {
+  formatCompassHeading,
+  formatNavigationDistance,
+  normalizeNavigationInstruction,
+  shouldShowManeuver,
+} from './src/navigation.ts'
+import { RouteTracker, maneuverForStep, type DrivingRoute, type LocationFix, type RouteStep } from './src/route.ts'
+
+assert.equal(formatNavigationDistance(0), '0 FT')
+assert.equal(formatNavigationDistance(0.05), '250 FT')
+assert.equal(formatNavigationDistance(0.8), '0.8 MI')
+assert.equal(formatNavigationDistance(10.4), '10 MI')
+assert.equal(shouldShowManeuver(1.51), false)
+assert.equal(shouldShowManeuver(1.5), true)
+assert.equal(shouldShowManeuver(0), true)
+assert.equal(formatCompassHeading(null), '--')
+assert.equal(formatCompassHeading(0), 'N')
+assert.equal(formatCompassHeading(315), 'NW')
+assert.equal(formatCompassHeading(405), 'NE')
+assert.deepEqual(normalizeNavigationInstruction({ maneuver: 'left', distanceMiles: 1.2, streetName: '  Sunset   Blvd  ' }), {
+  maneuver: 'left', distanceMiles: 1.2, streetName: 'Sunset Blvd',
+})
+assert.deepEqual(normalizeNavigationInstruction({ maneuver: 'invalid' as never, distanceMiles: -1, streetName: '' }), {
+  maneuver: 'straight', distanceMiles: 0, streetName: 'Continue on route',
+})
+console.log('Navigation validation, distance gating, compass headings, and formatting passed.')
+
+const routeStep = (
+  name: string,
+  coordinates: [number, number][],
+  type: string,
+  modifier?: string,
+): RouteStep => ({
+  name,
+  distance: coordinates.length > 1 ? 111 : 0,
+  duration: coordinates.length > 1 ? 10 : 0,
+  geometry: { type: 'LineString', coordinates },
+  maneuver: { type, modifier, location: coordinates[0] },
+})
+const route: DrivingRoute = {
+  distance: 222,
+  duration: 20,
+  geometry: [[0, 0], [0.001, 0], [0.001, 0.001]],
+  steps: [
+    routeStep('Main St', [[0, 0], [0.001, 0]], 'depart', 'straight'),
+    routeStep('First Ave', [[0.001, 0], [0.001, 0.001]], 'turn', 'right'),
+    routeStep('Destination', [[0.001, 0.001]], 'arrive'),
+  ],
+}
+const fix = (longitude: number, latitude: number, timestamp = 0): LocationFix => ({
+  longitude, latitude, timestamp, accuracy: 5, speedMps: 10, headingDegrees: 90,
+})
+const tracker = new RouteTracker(route)
+const initialProgress = tracker.update(fix(0, 0))
+assert.equal(initialProgress.stepIndex, 0)
+assert.equal(initialProgress.instruction.maneuver, 'right')
+assert.equal(initialProgress.instruction.streetName, 'Main St')
+assert.ok(initialProgress.distanceToManeuverMeters > 100)
+const turnedProgress = tracker.update(fix(0.00095, 0))
+assert.equal(turnedProgress.stepIndex, 1)
+assert.equal(turnedProgress.instruction.maneuver, 'arrive')
+assert.equal(turnedProgress.instruction.streetName, 'First Ave')
+assert.equal(tracker.update(fix(0.001, 0.001)).arrived, true)
+const inaccurateTracker = new RouteTracker(route)
+assert.equal(inaccurateTracker.update({ ...fix(0.00099, 0), accuracy: 150 }).stepIndex, 0)
+const offRouteTracker = new RouteTracker(route)
+offRouteTracker.update(fix(0, 0.002, 1000))
+const offRouteProgress = offRouteTracker.update(fix(0, 0.002, 8000))
+assert.equal(offRouteTracker.shouldReroute(offRouteProgress), true)
+assert.equal(maneuverForStep(routeStep('Circle', [[0, 0]], 'roundabout', 'right')), 'roundabout')
+console.log('Live route progress, turn advancement, arrival, maneuver mapping, and off-route detection passed.')
 
 const filter = createSpeedFilter()
 assert.equal(filter(null, 0), null)

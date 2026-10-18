@@ -2,17 +2,26 @@
   "package_id": "com.usman.glassdashv13",
   "edition": "202601",
   "name": "Glass Car Dash",
-  "tagline": "Live MPH speed and head-nod break reminders",
-  "description": "Live phone GPS speed with the Silverline gauge, plus a calibrated glasses-motion heuristic that shows a Take a break alert after repeated head nods. Tap to dismiss an alert; double-tap to exit. Requires calibration. This prototype does not confirm drowsiness.",
+  "tagline": "Live speed, turn guidance, and driver reminders",
+  "description": "Live phone GPS driving navigation with an OpenFreeMap phone map, OpenStreetMap destination search, automatic turn advancement and rerouting, speed, compass, road names, and a calibrated head-motion break-reminder prototype. Tap to dismiss an alert; double-tap to exit. This prototype does not confirm drowsiness.",
   "author": "Usman Kayani",
   "version": "0.5.0",
   "min_app_version": "2.0.0",
-  "min_sdk_version": "0.0.10",
+  "min_sdk_version": "0.0.11",
   "entrypoint": "index.html",
   "permissions": [
     {
       "name": "location",
-      "desc": "Uses your phone\u2019s GPS to show current speed in miles per hour."
+      "desc": "Uses your phone\u2019s GPS to show current speed in miles per hour and support route guidance."
+    },
+    {
+      "name": "network",
+      "desc": "Uses OpenFreeMap and OpenStreetMap services to display maps, search destinations, calculate driving routes, and reroute when needed.",
+      "whitelist": [
+        "https://tiles.openfreemap.org",
+        "https://nominatim.openstreetmap.org",
+        "https://router.project-osrm.org"
+      ]
     }
   ],
   "supported_languages": [
