@@ -81,11 +81,11 @@ async function getNowPlaying() {
     const out = await runAdb(['shell', 'dumpsys', 'media_session']);
     const targetMatch = out.match(/Media button session is ([^\s/]+)\//);
     const targetPkg = targetMatch ? targetMatch[1] : null;
-    if (!targetPkg) return { title: null, playing: null };
+    if (!targetPkg) return { title: null, artist: null, playing: null };
 
     const blocks = out.split(/\n(?=    \S.*\(userId=\d+\))/);
     const block = blocks.find((b) => b.includes(`package=${targetPkg}`));
-    if (!block) return { title: null, playing: null };
+    if (!block) return { title: null, artist: null, playing: null };
 
     const stateMatch = block.match(/state=PlaybackState \{state=(\w+)\(/);
     const playing = stateMatch ? stateMatch[1] === 'PLAYING' : null;

@@ -32,11 +32,10 @@ chmod +x setup.sh start.sh
 echo ""
 echo "--- config ---"
 if [ ! -f .env ]; then
-  cp .env.template .env
-  echo ".env created from the template — its default REMOTE_KEY already matches"
-  echo "the pre-built .ehpk in this repo's Releases, so the common path (use that"
-  echo ".ehpk) needs no changes. Only edit .env if you rebuild your own .ehpk with"
-  echo "a different key."
+  cp .env.example .env
+  echo ".env created from .env.example — set REMOTE_KEY in it to the same key"
+  echo "your .ehpk was built with (VITE_API_KEY), or every command fails with"
+  echo "\"bad key\":  nano ~/glass-car-dash/.env"
 else
   echo ".env already exists, leaving it alone"
 fi

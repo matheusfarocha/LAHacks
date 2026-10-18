@@ -21,7 +21,7 @@ fi
 if [ ! -f ~/glass-car-dash/.env ]; then
   echo ""
   echo "WARNING: ~/glass-car-dash/.env not found!"
-  echo "  cp ~/glass-car-dash/.env.template ~/glass-car-dash/.env"
+  echo "  cp ~/glass-car-dash/.env.example ~/glass-car-dash/.env"
   echo "  nano ~/glass-car-dash/.env     # set REMOTE_KEY to a random string"
 else
   echo ".env found"

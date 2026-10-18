@@ -21,7 +21,7 @@ function readJson(req) {
     let data = '';
     req.on('data', (c) => {
       data += c;
-      if (data.length > 1e5) { req.destroy(); reject(new Error('body too large')); }
+      if (data.length > 1e5) { req.destroy(); reject(Object.assign(new Error('body too large'), { status: 413 })); }
     });
     req.on('end', () => {
       if (!data) return resolve({});
@@ -77,7 +77,12 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, () => {
-  console.log(`Glass Car Dash backend -> http://0.0.0.0:${PORT}  (key ${KEY ? 'required' : 'DISABLED - set REMOTE_KEY'})`);
+// Loopback by default, matching the README/store listing's privacy claim —
+// the app and backend are the same phone. HOST=0.0.0.0 is only for the dev
+// loop, where vite's proxy (app/vite.config.ts) reaches the phone over Wi-Fi.
+const HOST = process.env.HOST || '127.0.0.1';
+
+server.listen(PORT, HOST, () => {
+  console.log(`Glass Car Dash backend -> http://${HOST}:${PORT}  (key ${KEY ? 'required' : 'DISABLED - set REMOTE_KEY'})`);
   if (debugLoggingEnabled()) console.log('Debug logging ENABLED -> ~/glass-car-dash-debug.log');
 });

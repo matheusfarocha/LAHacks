@@ -220,7 +220,7 @@ This checks for Node/adb, confirms your device is connected, and tells you
 if `.env` is missing. If it's missing:
 
 ```bash
-cp .env.template .env
+cp .env.example .env
 nano .env
 ```
 

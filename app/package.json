@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
+    "test": "node test.mts",
     "pack": "evenhub pack app.json dist -o glass-car-dash.ehpk",
     "simulate": "evenhub-simulator http://localhost:5173"
   },

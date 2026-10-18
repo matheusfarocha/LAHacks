@@ -117,6 +117,11 @@ function leftLines(): string[] {
 
   if (state.driving.roadName) lines.push(wrap(state.driving.roadName, LEFT_WRAP_WIDTH).split('\n')[0])
 
+  // Trip distance + timer (see speed.ts) — only once the first fix has
+  // started the trip, so a cold start doesn't show a meaningless "0.0 mi 0m".
+  const d = state.driving
+  if (d.tripSeconds > 0) lines.push(`${d.tripMiles.toFixed(1)} mi · ${F.tripDuration(d.tripSeconds)}`)
+
   return lines
 }
 
