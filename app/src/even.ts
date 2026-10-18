@@ -157,7 +157,21 @@ export class Runtime {
       ctx.save()
       ctx.translate(WIDTH * (1 - GAUGE_SCALE) / 2, HEIGHT * (1 - GAUGE_SCALE) / 2)
       ctx.scale(GAUGE_SCALE, GAUGE_SCALE)
-      ctx.drawImage(this.gauge, 0, 0)
+      // Reveal the arcs from the bottom up in proportion to speed; dark at 0 mph.
+      const MAX_GAUGE_MPH = 80
+      const fill = speedMph == null ? 0 : Math.min(1, Math.max(0, speedMph / MAX_GAUGE_MPH))
+      if (fill > 0) {
+        const arcTop = 8
+        const arcHeight = 184
+        const revealTop = arcTop + arcHeight * (1 - fill)
+        ctx.save()
+        ctx.beginPath()
+        ctx.rect(0, revealTop, WIDTH, HEIGHT - revealTop)
+        ctx.clip()
+        ctx.globalAlpha = 0.45 + 0.55 * fill
+        ctx.drawImage(this.gauge, 0, 0)
+        ctx.restore()
+      }
       ctx.fillStyle = '#78df6c'
       ctx.textAlign = 'center'
       ctx.textBaseline = 'middle'
