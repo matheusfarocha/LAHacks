@@ -3,7 +3,7 @@
   "edition": "202601",
   "name": "Glass Car Dash",
   "tagline": "Live MPH speed and head-nod break reminders",
-  "description": "Live phone GPS speed with the Silverline gauge, plus a calibrated glasses-motion heuristic that shows a Take a break alert after repeated head nods. Tap to dismiss an alert; double-tap to exit. Requires calibration. This prototype does not confirm drowsiness.",
+  "description": "Live phone GPS speed with the Silverline gauge. Automatically learns and slowly adjusts the reference head pose, with small movements allowed. Two separate downward nods trigger a Take a break reminder, with a 750 ms pause per counted nod. Pose setup status appears only on the phone. Tap to dismiss; double-tap to exit. This motion heuristic does not confirm drowsiness.",
   "author": "Usman Kayani",
   "version": "0.5.0",
   "min_app_version": "2.0.0",

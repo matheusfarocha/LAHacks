@@ -8,16 +8,17 @@ In a regular browser, the preview uses clearly labeled simulated speed. Open the
 
 ## Head-nod alert
 
-Reopen the app using the Even app's Prototype Mode QR scanner. Keep the phone app open. The phone controls show sensor availability and calibration instructions.
+Open the app using the Even app's Prototype Mode QR scanner and keep the phone app open. The reference head pose is learned automatically over about three seconds with small natural movements allowed (4° RMS, 10° excursion limit). Countdown, Pose set, nod count, and cooldown are shown on the phone only. The glasses show the speed gauge or the break alert. There is no down-direction confirmation button or per-session pose test.
 
-1. While stationary and wearing the glasses, look forward and press **Capture forward pose**. Hold still for two seconds.
-2. Lower your chin and press **Capture head-down pose**. Hold still for two seconds, then return to looking forward.
-3. Monitoring starts after calibration. Two downward dips lasting 350–2500 ms each, completed within eight seconds, trigger the **TAKE A BREAK / Head nod detected** screen. There is no GPS speed gate, so you can test while stationary.
-4. Tap the glasses or press **Dismiss alert** to return to the current speed. Automatic alerts have a 30-second cooldown. **Preview alert** displays the warning without triggering the detector and works in a browser too.
+Only positive downward pitch counts. Two downward dips and returns within eight seconds trigger **TAKE A BREAK**. Each dip must exceed 8° and return within 3°, lasting 180–3000 ms. A 750 ms cooldown after each counted nod prevents repeated counts from one bob; a fresh neutral pose and new dip are required after cooldown. Looking up or making a dominant sideways tilt cancels a pending dip. Holding a tilt alone does not trigger an alert. There is no 30-second alert cooldown.
 
-Motion comes from the glasses' IMU, not the phone. The SDK documents only raw x/y/z samples, with no axis or unit guarantees; two-pose calibration avoids assuming a particular pitch axis. Missing or rejected sensor data must not be treated as working monitoring. Sensor interruptions clear calibration and require another capture. Exit stops location and IMU reporting.
+The reference adjusts gradually for slow changes: a ten-second time constant capped at 0.35° per second, within 6° of the current reference. Reference tracking pauses during fast motion, a pending/countable nod sequence, or nod cooldown. A sudden held head drop outside that tracking range does not become the new neutral. This can follow gradual road pitch, but cannot reliably distinguish every slow head slump from a vehicle incline using glasses motion alone.
 
-This is a head-motion prototype, not a validated drowsiness detector. Deliberate nods can trigger it, and drowsiness without nodding will not. Thresholds and sensor behavior still need validation on the actual glasses. The alert's triangle matches the Head-nod Alert mockup; it uses transparent surroundings and stays visible until acknowledged.
+The signed device axis is configured in `G2_DOWN_AXIS` in `app/src/drowsiness.ts`, rather than inferred from a neutral pose or a user test. Its default direction still needs validation on the actual device/firmware; looking down should make the phone's signed pitch positive. Unit tests exercise the mapping mathematically, not physical sensor polarity.
+
+Tap the glasses or press **Dismiss alert** to return to current speed. **Preview alert** works in the browser too, where speed and the steady pose-learning signal are clearly labeled simulations. **Relearn driving pose** is optional if the glasses shift. Sensor gaps and invalid data clear the nod sequence without changing the reference.
+
+Motion comes from the glasses, not the phone. The detector assumes a gravity-bearing IMU vector and normalizes it to avoid relying on g versus m/s². This is a head-motion break-reminder prototype, not a validated drowsiness detector. Intentional downward nods can trigger it, and drowsiness without head motion will not.
 
 ## Run locally
 

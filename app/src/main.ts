@@ -1,6 +1,6 @@
 import { Runtime } from './even'
 import { createSpeedFilter } from './speed'
-import { HeadNodDetector, averageMotion, type MotionSample } from './drowsiness'
+import { HeadNodDetector, NOD_COOLDOWN_MS, type MotionSample } from './drowsiness'
 
 const runtime = new Runtime()
 const filterSpeed = createSpeedFilter()
@@ -11,15 +11,9 @@ let pending = false
 let stopped = false
 let alert = false
 let demoAlert = false
-let calibrated = false
 let motionEnabled = false
 let lastMotionAt = 0
-let neutral: MotionSample | null = null
-let neutralSamples: MotionSample[] = []
-let capture: 'neutral' | 'down' | null = null
-let captureSamples: MotionSample[] = []
 let staleTimer: ReturnType<typeof setTimeout> | undefined
-let calibrationTimer: ReturnType<typeof setTimeout> | undefined
 let statusTimer: ReturnType<typeof setInterval> | undefined
 let retryTimer: ReturnType<typeof setTimeout> | undefined
 
@@ -42,22 +36,30 @@ async function paint(): Promise<void> {
 }
 
 function updateMotionStatus() {
-  if (stopped || capture) return
+  if (stopped) return
+  const current = detector.feedback()
+  const fresh = lastMotionAt > 0 && Date.now() - lastMotionAt <= 5000
+  const ready = current.calibrated && fresh
+  runtime.setMotionFeedback(ready ? current.angle : null, ready ? current.nods : null)
+  runtime.setCalibrationControls(motionEnabled && fresh)
   if (alert) {
-    runtime.setMotionStatus(demoAlert ? 'Alert preview · dismiss to return to speed.' : 'Repeated head nods detected. Take a break. Tap the glasses or Dismiss alert to acknowledge.')
+    runtime.setMotionStatus(demoAlert ? 'Alert preview · dismiss to return to speed.' : 'Repeated head movement detected. Take a break. Tap the glasses or Dismiss alert to acknowledge.')
+  } else if (!motionEnabled) {
     return
-  }
-  if (!motionEnabled) return
-  const fresh = lastMotionAt > 0 && Date.now() - lastMotionAt <= 2000
-  runtime.setCalibrationControls(fresh, neutral != null)
-  if (!fresh) {
+
+  } else if (!fresh) {
     runtime.setMotionStatus('Waiting for head-motion samples. Automatic alerts are paused.')
-  } else if (calibrated) {
-    runtime.setMotionStatus('Head-nod monitoring active · two nods within eight seconds trigger an alert.')
-  } else if (neutral) {
-    runtime.setMotionStatus('Now lower your chin and capture the head-down pose. Hold still during capture.')
+  } else if (!current.signalValid) {
+    runtime.setMotionStatus('Waiting for a stable, nonzero motion signal. Automatic alerts are paused.')
+  } else if (!current.calibrated) {
+    runtime.setMotionStatus('Learning normal pose · ' + current.countdownSeconds + 's. Small movements are OK; large movements restart learning.')
+
+  } else if (current.nodCooldownMs > 0) {
+    runtime.setMotionStatus('Nod counted · waiting ' + (current.nodCooldownMs / 1000).toFixed(1) + 's before another nod can count.')
+  } else if (!current.settled) {
+    runtime.setMotionStatus('Return near your learned driving pose to resume monitoring.')
   } else {
-    runtime.setMotionStatus('Look straight ahead, then capture your forward pose. Hold still during capture.')
+    runtime.setMotionStatus('Pose set · downward nods only · ' + NOD_COOLDOWN_MS + 'ms pause per nod · gradual pose adjustment active.')
   }
 }
 
@@ -71,9 +73,9 @@ function showAlert(preview = false) {
 
 function dismissAlert() {
   if (!alert) return
+  detector.reset()
   alert = false
   demoAlert = false
-  detector.reset()
   updateMotionStatus()
   void paint()
 }
@@ -90,60 +92,23 @@ function onSpeed(speedMps: number | null) {
 }
 
 function onMotion(sample: MotionSample) {
-  if (stopped || ![sample.x, sample.y, sample.z].every(Number.isFinite)) return
-  const resumed = !lastMotionAt || Date.now() - lastMotionAt > 2000
+  if (stopped) return
   lastMotionAt = Date.now()
-  if (resumed && motionEnabled) updateMotionStatus()
-  if (capture) {
-    captureSamples.push({ ...sample })
-    return
-  }
-  if (calibrated && !alert && detector.update(sample, lastMotionAt, true)) showAlert()
+  if (alert) return
+  if (detector.update(sample, lastMotionAt)) showAlert()
+  const feedback = detector.feedback()
+  runtime.setMotionFeedback(feedback.calibrated ? feedback.angle : null, feedback.calibrated ? feedback.nods : null)
 }
 
-function capturePose(pose: 'neutral' | 'down') {
-  if (stopped || capture || !motionEnabled || Date.now() - lastMotionAt > 2000) return
-  if (pose === 'down' && !neutral) return
-  if (pose === 'neutral') {
-    calibrated = false
-    neutral = null
-    neutralSamples = []
-    detector.reset()
-  }
-  capture = pose
-  captureSamples = []
-  runtime.setCalibrationControls(false, false)
-  runtime.setMotionStatus(pose === 'neutral' ? 'Hold your head forward and still for two seconds…' : 'Hold your chin down and still for two seconds…')
-  calibrationTimer = setTimeout(() => {
-    capture = null
-    const mean = averageMotion(captureSamples)
-    if (!mean) {
-      runtime.setMotionStatus('Not enough motion samples. Keep the glasses connected and try capturing again.')
-    } else if (pose === 'neutral') {
-      neutral = mean
-      neutralSamples = [...captureSamples]
-      updateMotionStatus()
-    } else if (neutral) {
-      const distance = Math.hypot(mean.x - neutral.x, mean.y - neutral.y, mean.z - neutral.z)
-      const spread = (samples: MotionSample[], center: MotionSample) => Math.sqrt(
-        samples.reduce((sum, sample) => sum + (sample.x - center.x) ** 2 + (sample.y - center.y) ** 2 + (sample.z - center.z) ** 2, 0) / samples.length,
-      )
-      if (spread(neutralSamples, neutral) > distance * 0.2 || spread(captureSamples, mean) > distance * 0.2 || !detector.calibrate(neutral, mean)) {
-        runtime.setMotionStatus('Poses were too similar or moved during capture. Capture forward and head-down poses again.')
-      } else {
-        calibrated = true
-        updateMotionStatus()
-      }
-    }
-    runtime.setCalibrationControls(true, neutral != null)
-    // Keep capture feedback visible until the user tries again or a sensor gap.
-  }, 2000)
+function relearnPose() {
+  if (stopped || !motionEnabled) return
+  detector.relearn()
+  updateMotionStatus()
 }
 
 function cleanup() {
   stopped = true
   clearTimeout(staleTimer)
-  clearTimeout(calibrationTimer)
   clearInterval(statusTimer)
   clearTimeout(retryTimer)
   void runtime.exit().catch(() => {})
@@ -153,11 +118,12 @@ async function main() {
   runtime.onExit(cleanup)
   runtime.onTap(dismissAlert)
   runtime.onMotion(onMotion)
-  runtime.onCalibrate(capturePose)
+  runtime.onCalibrate(relearnPose)
   runtime.onTestAlert(() => showAlert(true))
   runtime.onAcknowledge(dismissAlert)
   await runtime.connect()
   await paint()
+  if (stopped) return
   await Promise.all([
     runtime.startSpeedUpdates(onSpeed).catch((error: unknown) => {
       runtime.showError(error instanceof Error ? error.message : 'GPS unavailable.')
@@ -170,18 +136,9 @@ async function main() {
   ])
   if (stopped) return
   statusTimer = setInterval(() => {
-    if (lastMotionAt && Date.now() - lastMotionAt > 2000) {
-      clearTimeout(calibrationTimer)
-      capture = null
-      captureSamples = []
-      calibrated = false
-      neutral = null
-      detector.reset()
-      runtime.setCalibrationControls(false, false)
-      if (!alert) runtime.setMotionStatus('Head-motion updates paused. Recalibrate after the sensor reconnects.')
-    } else if (calibrated || motionEnabled && !lastMotionAt) updateMotionStatus()
-    else if (!capture) runtime.setCalibrationControls(Date.now() - lastMotionAt <= 2000, neutral != null)
-  }, 1000)
+    if (lastMotionAt && Date.now() - lastMotionAt > 5000) detector.reset()
+    updateMotionStatus()
+  }, 500)
 }
 
 window.addEventListener('pagehide', cleanup)

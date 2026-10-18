@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { createSpeedFilter } from './src/speed.ts'
-import { HeadNodDetector, averageMotion } from './src/drowsiness.ts'
+import { HeadNodDetector } from './src/drowsiness.ts'
 
 const filter = createSpeedFilter()
 assert.equal(filter(null, 0), null)
@@ -25,59 +25,95 @@ assert.equal(accelerating(20, 1000), 0)
 assert.ok(accelerating(20, 3000)! > 0)
 console.log('Speed conversion, smoothing, spike rejection, and invalid readings passed.')
 
-assert.equal(averageMotion([]), null)
-assert.equal(averageMotion(Array(5).fill({ x: NaN, y: 0, z: 0 })), null)
-assert.deepEqual(averageMotion(Array(5).fill({ x: 1, y: 2, z: 3 })), { x: 1, y: 2, z: 3 })
-const neutral = { x: 0, y: 0, z: 0 }
-const down = { x: 0, y: 10, z: 0 }
-
-function motionFixture() {
+function motionFixture(learn = true, baseAngle = 0) {
   const detector = new HeadNodDetector()
-  assert.equal(detector.calibrate(neutral, down), true)
   let now = 0
   let alerts = 0
-  return {
+  const fixture = {
     detector,
-    feed(y: number, duration: number, x = 0, enabled = true) {
+    feed(degrees: number, duration: number, axis = 'x', scale = 1, enabled = true) {
+      const radians = (degrees + baseAngle) * Math.PI / 180
+      const sample = axis === 'x'
+        ? { x: Math.sin(radians) * 9.81 * scale, y: 0, z: Math.cos(radians) * 9.81 * scale }
+        : { x: 0, y: Math.sin(radians) * 9.81 * scale, z: Math.cos(radians) * 9.81 * scale }
       for (let elapsed = 0; elapsed < duration; elapsed += 100) {
         now += 100
-        if (detector.update({ x, y, z: 0 }, now, enabled)) alerts++
+        if (detector.update(sample, now, enabled)) alerts++
       }
     },
-    nod() { this.feed(10, 600); this.feed(0, 300) },
-    gap() { now += 2000 },
+    nod() { this.feed(12, 300); this.feed(0, 1100) },
+    gap() { now += 4000 },
     get alerts() { return alerts },
+    get feedback() { return detector.feedback(now) },
+    get now() { return now },
   }
+  if (learn) {
+    fixture.feed(0, 3200)
+    assert.equal(fixture.feedback.calibrated, true, 'steady pose is learned automatically')
+  }
+  return fixture
 }
 
+const learning = motionFixture(false)
+assert.equal(learning.feedback.countdownSeconds, 3)
+learning.feed(0, 1100)
+assert.equal(learning.feedback.countdownSeconds, 2)
+learning.feed(0, 1000)
+assert.equal(learning.feedback.countdownSeconds, 1)
+learning.detector.relearn()
+assert.equal(learning.feedback.countdownSeconds, 3)
+learning.feed(0, 1500)
+assert.equal(learning.feedback.calibrated, false)
+assert.ok(learning.feedback.progress > 0)
+for (let i = 0; i < 20; i++) { learning.feed(12, 100); learning.feed(0, 100) }
+assert.equal(learning.feedback.calibrated, false, 'movement prevents learning an unstable pose')
+assert.equal(learning.feedback.countdownSeconds, 3, 'movement resets the pose countdown')
+assert.equal(learning.alerts, 0)
+learning.feed(0, 3200)
+assert.equal(learning.feedback.calibrated, true)
+assert.equal(learning.feedback.countdownSeconds, 0, 'pose establishment completes the countdown')
+learning.nod(); learning.nod()
+assert.equal(learning.alerts, 1, 'no manual capture is required')
+
 const repeated = motionFixture()
-repeated.feed(10, 600) // Ending calibration head-down must not count as a nod.
-repeated.feed(0, 300)
 repeated.nod()
 assert.equal(repeated.alerts, 0)
+assert.equal(repeated.feedback.nods, 1)
 repeated.nod()
 assert.equal(repeated.alerts, 1)
+repeated.detector.reset() // Dismiss the warning; only the per-nod cooldown remains.
+repeated.feed(0, 100)
 repeated.nod(); repeated.nod()
-assert.equal(repeated.alerts, 1, 'cooldown suppresses repeated alerts')
-repeated.feed(0, 31000)
-repeated.nod(); repeated.nod()
-assert.equal(repeated.alerts, 2, 'detection resumes after cooldown')
+assert.equal(repeated.alerts, 2, 'a new pair can alert without a 30-second lockout')
+
+const rapid = motionFixture()
+rapid.feed(12, 300); rapid.feed(0, 100)
+assert.equal(rapid.feedback.nods, 1)
+assert.equal(rapid.feedback.nodCooldownMs, 750)
+rapid.feed(12, 300); rapid.feed(0, 100)
+assert.equal(rapid.feedback.nods, 1, 'rapid duplicate bobs are ignored during the nod cooldown')
+assert.equal(rapid.alerts, 0)
+rapid.feed(12, 1500)
+assert.equal(rapid.feedback.nods, 1, 'a bob begun during cooldown cannot count when the timer expires')
+rapid.feed(0, 100)
+rapid.feed(12, 300); rapid.feed(0, 100)
+assert.equal(rapid.alerts, 1, 'a new complete nod after cooldown triggers the second count')
 
 const jitter = motionFixture()
-jitter.feed(0, 200)
-for (let i = 0; i < 10; i++) { jitter.feed(10, 100); jitter.feed(0, 100) }
+for (let i = 0; i < 10; i++) { jitter.feed(12, 100); jitter.feed(0, 100) }
 assert.equal(jitter.alerts, 0, 'brief bumps are rejected')
-jitter.feed(10, 3000); jitter.feed(0, 300)
-assert.equal(jitter.alerts, 0, 'a prolonged look down is rejected')
-jitter.feed(10, 600, 20); jitter.feed(0, 300)
-jitter.feed(10, 600, 20); jitter.feed(0, 300)
-assert.equal(jitter.alerts, 0, 'sideways movement is rejected')
+jitter.feed(12, 600, 'x', 2); jitter.feed(0, 300)
+assert.equal(jitter.alerts, 0, 'large acceleration is rejected')
+const mixed = motionFixture()
+mixed.nod(); mixed.feed(12, 200, 'y'); mixed.feed(0, 300)
+assert.equal(mixed.alerts, 0, 'sideways movement never supplies the second nod')
 
 const interrupted = motionFixture()
-interrupted.feed(0, 200); interrupted.nod(); interrupted.gap()
+interrupted.nod(); interrupted.gap()
 interrupted.feed(0, 200); interrupted.nod()
 assert.equal(interrupted.alerts, 0, 'sensor gaps clear the prior nod')
-interrupted.feed(0, 100, 0, false)
+assert.equal(interrupted.feedback.calibrated, true, 'short sensor gaps preserve the learned pose')
+interrupted.feed(0, 100, 'x', 1, false)
 interrupted.feed(0, 200); interrupted.nod()
 assert.equal(interrupted.alerts, 0, 'disabled monitoring clears the prior nod')
 interrupted.feed(NaN, 100)
@@ -85,8 +121,85 @@ interrupted.feed(0, 200); interrupted.nod()
 assert.equal(interrupted.alerts, 0, 'invalid samples clear the prior nod')
 
 const expired = motionFixture()
-expired.feed(0, 200); expired.nod(); expired.feed(0, 9000); expired.nod()
+expired.nod(); expired.feed(0, 9000); expired.nod()
 assert.equal(expired.alerts, 0, 'isolated nods outside the window do not alert')
-assert.equal(expired.detector.calibrate(neutral, neutral), false)
-assert.equal(expired.detector.update(down, 20000, true), false, 'bad calibration disables detection')
-console.log('Head-nod calibration, repeated nods, cooldown, jitter, sideways motion, stale data, invalid data, and isolated nods passed.')
+expired.detector.relearn()
+assert.equal(expired.feedback.calibrated, false)
+expired.nod(); expired.nod()
+assert.equal(expired.alerts, 0, 'relearning pauses detection until a new steady pose exists')
+
+const slumped = motionFixture()
+slumped.feed(16, 15000)
+assert.equal(slumped.alerts, 0, 'holding beyond the tilt threshold no longer triggers an instant alert')
+assert.ok(Math.abs(slumped.feedback.angle! - 16) < 0.01, 'a held slump never becomes the new neutral')
+slumped.feed(0, 300)
+slumped.nod(); slumped.nod()
+assert.equal(slumped.alerts, 1)
+
+const mounted = motionFixture(true, 20)
+mounted.nod(); mounted.nod()
+assert.equal(mounted.alerts, 1, 'initial mounting angle is removed by the automatic baseline')
+
+const zero = motionFixture(false)
+zero.feed(0, 10000, 'x', 0)
+assert.equal(zero.feedback.calibrated, false)
+assert.equal(zero.feedback.signalValid, false, 'zero vectors cannot arm monitoring')
+const scaled = motionFixture(false)
+scaled.feed(0, 3200, 'x', 1 / 9.81)
+assert.equal(scaled.feedback.calibrated, true, 'gravity units need not be m/s²')
+scaled.feed(12, 200, 'x', 1 / 9.81); scaled.feed(0, 1100, 'x', 1 / 9.81)
+scaled.feed(12, 200, 'x', 1 / 9.81); scaled.feed(0, 1100, 'x', 1 / 9.81)
+assert.equal(scaled.alerts, 1)
+const upward = motionFixture()
+for (let i = 0; i < 4; i++) { upward.feed(-16, 400); upward.feed(0, 1100) }
+assert.equal(upward.alerts, 0, 'looking upward repeatedly never triggers')
+assert.equal(upward.feedback.nods, 0, 'upward looks do not count as nods')
+for (const side of [-1, 1]) {
+  const sideways = motionFixture()
+  for (let i = 0; i < 4; i++) { sideways.feed(side * 16, 400, 'y'); sideways.feed(0, 1100) }
+  assert.equal(sideways.alerts, 0, 'left/right tilt never triggers')
+  assert.equal(sideways.feedback.nods, 0)
+  sideways.feed(0, 10000) // A pure yaw turn leaves gravity unchanged.
+  assert.equal(sideways.alerts, 0)
+}
+const interruptedDip = motionFixture()
+interruptedDip.feed(12, 300); interruptedDip.feed(-12, 300); interruptedDip.feed(0, 1200)
+assert.equal(interruptedDip.feedback.nods, 0, 'an upward excursion cannot complete a pending down-nod')
+
+const relaxed = motionFixture(false)
+for (let i = 0; i < 32; i++) relaxed.feed(i % 2 ? 3 : -3, 100)
+assert.equal(relaxed.feedback.calibrated, true, 'natural three-degree movements do not restart pose learning')
+assert.equal(relaxed.feedback.countdownSeconds, 0)
+const littleBump = motionFixture(false)
+littleBump.feed(0, 2000); littleBump.feed(6, 200); littleBump.feed(0, 1000)
+assert.equal(littleBump.feedback.calibrated, true, 'a small brief adjustment does not restart the countdown')
+
+const downhill = motionFixture()
+for (let i = 1; i <= 800; i++) downhill.feed(i * 0.02, 100) // 0.2°/s gradual change.
+assert.equal(downhill.alerts, 0, 'gradual downhill motion does not count as nodding')
+assert.ok(Math.abs(downhill.feedback.angle!) < 3, 'the reference follows gradual downhill pitch')
+const beforeBob = downhill.feedback.angle!
+downhill.feed(28, 300)
+assert.ok(downhill.feedback.angle! > beforeBob + 10, 'a fast head bob is not absorbed by reference tracking')
+downhill.feed(16, 1100)
+downhill.feed(28, 300); downhill.feed(16, 1100)
+assert.equal(downhill.alerts, 1, 'two down-nods still trigger on an adapted incline')
+
+const uphill = motionFixture()
+for (let i = 1; i <= 800; i++) uphill.feed(-i * 0.02, 100)
+assert.equal(uphill.alerts, 0, 'gradual uphill motion does not count as nodding')
+assert.ok(Math.abs(uphill.feedback.angle!) < 3, 'the reference follows gradual uphill pitch too')
+uphill.feed(-4, 300); uphill.feed(-16, 1100)
+uphill.feed(-4, 300); uphill.feed(-16, 1100)
+assert.equal(uphill.alerts, 1, 'downward nods remain detectable after uphill adaptation')
+
+const configured = motionFixture()
+assert.equal(configured.detector.setDownAxis({ x: 0, y: 0, z: 0 }), false)
+assert.equal(configured.detector.setDownAxis({ x: 0, y: -1, z: 0 }), true)
+configured.feed(0, 100)
+configured.feed(12, 300); configured.feed(0, 1100)
+assert.equal(configured.feedback.nods, 0, 'a device-specific sign mapping rejects its opposite direction')
+configured.feed(-12, 300); configured.feed(0, 1100)
+configured.feed(-12, 300); configured.feed(0, 1100)
+assert.equal(configured.alerts, 1)
+console.log('Downward pitch, up/left/right rejection, automatic pose learning, 750ms nod cooldown, gradual incline tracking, and bob preservation passed.')

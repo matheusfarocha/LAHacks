@@ -10,7 +10,7 @@ import {
   ImuReportPace,
   type EvenAppBridge,
 } from '@evenrealities/even_hub_sdk'
-import type { MotionSample } from './drowsiness'
+import { NOD_ANGLE_DEG, type MotionSample } from './drowsiness'
 import mockupUrl from '../../docs/mockups/amg-silverline.png?url'
 
 const TILE_W = 200
@@ -30,15 +30,16 @@ export class Runtime {
   private exitHandler: () => void = () => {}
   private unsubscribeLocation: (() => void) | undefined
   private previewTimer: ReturnType<typeof setInterval> | undefined
+  private previewMotionTimer: ReturnType<typeof setInterval> | undefined
   private exited = false
   private lastSpeed: string | undefined
   private motionHandler: (sample: MotionSample) => void = () => {}
   private tapHandler: () => void = () => {}
   private unsubscribeEvents: (() => void) | undefined
   private motionStatus = document.createElement('p')
+  private motionFeedback = document.createElement('p')
   private neutralButton = document.createElement('button')
-  private downButton = document.createElement('button')
-  private calibrationHandler: (pose: 'neutral' | 'down') => void = () => {}
+  private calibrationHandler: () => void = () => {}
   private testAlertHandler: () => void = () => {}
   private acknowledgeHandler: () => void = () => {}
   private warning = document.createElement('canvas')
@@ -84,12 +85,20 @@ export class Runtime {
 
   onMotion(handler: (sample: MotionSample) => void) { this.motionHandler = handler }
   onTap(handler: () => void) { this.tapHandler = handler }
-  onCalibrate(handler: (pose: 'neutral' | 'down') => void) { this.calibrationHandler = handler }
+  onCalibrate(handler: () => void) { this.calibrationHandler = handler }
   onTestAlert(handler: () => void) { this.testAlertHandler = handler }
   onAcknowledge(handler: () => void) { this.acknowledgeHandler = handler }
 
   async startMotionUpdates(): Promise<boolean> {
-    if (!this.bridge || this.exited) return false
+    if (this.exited) return false
+    if (!this.bridge) {
+      // Exercise the same learning/countdown path in the browser, with an
+      // explicitly labeled simulated steady gravity vector, never fake live data.
+      this.previewMotionTimer = setInterval(() => {
+        if (!this.exited) this.motionHandler({ x: 0, y: 0, z: 9.81 })
+      }, 100)
+      return true
+    }
     const enabled = await this.bridge.imuControl(true, ImuReportPace.P100)
     if (this.exited) {
       void this.bridge.imuControl(false).catch(() => {})
@@ -98,13 +107,18 @@ export class Runtime {
     return enabled
   }
 
-  setMotionStatus(message: string) { this.motionStatus.textContent = message }
+  setMotionStatus(message: string) {
+    this.motionStatus.textContent = (this.bridge ? '' : 'Demo · ') + message
+  }
 
-  setCalibrationControls(enabled: boolean, canCaptureDown: boolean) {
+  setMotionFeedback(angle: number | null, nods: number | null) {
+    const percent = angle == null ? '—' : Math.round(Math.max(0, angle) / NOD_ANGLE_DEG * 100) + '% of threshold (' + angle.toFixed(1) + '°; down is positive)'
+    this.motionFeedback.textContent = 'Downward pitch: ' + percent + ' · Completed nods: ' + (nods ?? '—') + ' / 2'
+  }
+
+  setCalibrationControls(enabled: boolean) {
     this.neutralButton.disabled = !enabled
-    this.downButton.disabled = !enabled || !canCaptureDown
-    this.neutralButton.style.opacity = this.neutralButton.disabled ? '0.4' : '1'
-    this.downButton.style.opacity = this.downButton.disabled ? '0.4' : '1'
+    this.neutralButton.style.opacity = enabled ? '1' : '0.4'
   }
 
   private prepareGauge() {
@@ -167,7 +181,7 @@ export class Runtime {
       ctx.fillText('MPH', WIDTH / 2, 155)
       ctx.restore()
     }
-    this.canvas.setAttribute('aria-label', alert ? 'Take a break. Head nod detected. Tap to dismiss.' : speedMph == null ? 'Waiting for GPS speed' : text + ' MPH')
+    this.canvas.setAttribute('aria-label', alert ? 'Take a break. Head movement detected. Tap to dismiss.' : (speedMph == null ? 'Waiting for GPS speed' : text + ' MPH'))
 
     if (this.bridge) {
       for (let index = 0; index < 4; index++) {
@@ -214,7 +228,7 @@ export class Runtime {
     ctx.font = '700 30px -apple-system, BlinkMacSystemFont, Arial, sans-serif'
     ctx.fillText('TAKE A BREAK', WIDTH / 2, 122)
     ctx.font = '16px -apple-system, BlinkMacSystemFont, Arial, sans-serif'
-    ctx.fillText('Head nod detected', WIDTH / 2, 155)
+    ctx.fillText('Head movement detected', WIDTH / 2, 155)
     ctx.font = '12px -apple-system, BlinkMacSystemFont, Arial, sans-serif'
     ctx.fillText('Tap to dismiss', WIDTH / 2, 181)
   }
@@ -253,6 +267,7 @@ export class Runtime {
 
   async exit(): Promise<void> {
     this.exited = true
+    clearInterval(this.previewMotionTimer)
     this.stopSpeedUpdates()
     this.unsubscribeEvents?.()
     if (this.bridge) {
@@ -272,18 +287,18 @@ export class Runtime {
     display.append(this.canvas)
     const hint = document.createElement('p')
     const hasHost = typeof (window as any).flutter_inappwebview?.callHandler === 'function'
-    hint.textContent = hasHost ? 'Live GPS speed · double-tap to exit' : 'Simulated speed · browser preview'
+    hint.textContent = hasHost ? 'Live GPS speed · double-tap to exit' : 'Simulated speed and head motion · browser preview'
     hint.style.cssText = 'color:#888;font:12px system-ui;margin:0'
     const controls = document.createElement('section')
     controls.style.cssText = 'width:min(576px,100%);padding:16px;box-sizing:border-box;border:1px solid #333;border-radius:8px;display:flex;flex-direction:column;gap:12px;text-align:left'
     const title = document.createElement('strong')
     title.textContent = 'Head-nod alert'
     const note = document.createElement('p')
-    note.textContent = 'Calibrate while stationary. Repeated head dips can trigger a break reminder; this is a motion heuristic, not a confirmed drowsiness assessment.'
+    note.textContent = 'Your normal pose is learned automatically; small natural movements are OK. Repeated downward nods can trigger a break reminder; head motion alone does not confirm drowsiness.'
     note.style.cssText = 'margin:0;color:#aaa;font:13px/1.5 system-ui'
     this.motionStatus.style.cssText = 'margin:0;color:#9ce78b;font:13px/1.5 system-ui'
     this.motionStatus.setAttribute('role', 'status')
-    this.motionStatus.textContent = hasHost ? 'Connecting to head-motion sensor…' : 'Browser preview · automatic detection requires the glasses'
+    this.motionStatus.textContent = hasHost ? 'Connecting to head-motion sensor…' : 'Demo · starting simulated pose-learning countdown…'
     const buttons = document.createElement('div')
     buttons.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap'
     const styleButton = (button: HTMLButtonElement, label: string, action: () => void) => {
@@ -292,12 +307,13 @@ export class Runtime {
       button.onclick = action
       buttons.append(button)
     }
-    styleButton(this.neutralButton, '1. Capture forward pose', () => this.calibrationHandler('neutral'))
-    styleButton(this.downButton, '2. Capture head-down pose', () => this.calibrationHandler('down'))
+    styleButton(this.neutralButton, 'Relearn driving pose', () => this.calibrationHandler())
     styleButton(document.createElement('button'), 'Preview alert', () => this.testAlertHandler())
     styleButton(document.createElement('button'), 'Dismiss alert', () => this.acknowledgeHandler())
-    this.setCalibrationControls(false, false)
-    controls.append(title, note, this.motionStatus, buttons)
+    this.setCalibrationControls(false)
+    this.motionFeedback.style.cssText = 'margin:0;color:#eee;font:600 15px/1.5 system-ui;font-variant-numeric:tabular-nums'
+    this.setMotionFeedback(null, null)
+    controls.append(title, note, this.motionFeedback, this.motionStatus, buttons)
     document.getElementById('app')!.replaceChildren(display, hint, this.error, controls)
     document.getElementById('app')!.style.height = 'auto'
     document.getElementById('app')!.style.minHeight = '100%'
