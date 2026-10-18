@@ -7,6 +7,7 @@ export const NOD_COOLDOWN_MS = 750
 export const G2_DOWN_AXIS: MotionSample = { x: 0, y: 1, z: 0 }
 const LEARN_MS = 3000
 const MIN_SAMPLES = 12
+const POSTURE_RESET_MS = 8000
 
 function magnitude(value: MotionSample) { return Math.hypot(value.x, value.y, value.z) }
 function dot(a: MotionSample, b: MotionSample) { return a.x * b.x + a.y * b.y + a.z * b.z }
@@ -45,6 +46,9 @@ export class HeadNodDetector {
   private previousSample: MotionSample | null = null
   private previousSampleAt: number | null = null
   private freezeReferenceUntil = 0
+  private posture: { sample: MotionSample; magnitude: number; at: number }[] = []
+  private postureProgress = 0
+  private lastPostureResetAt: number | null = null
 
   feedback(now = Date.now()) {
     return {
@@ -56,10 +60,12 @@ export class HeadNodDetector {
       settled: this.settled,
       nods: this.nods.filter((time) => now - time <= 8000).length,
       nodCooldownMs: Math.max(0, this.nodCooldownUntil - now),
+      postureCountdownSeconds: this.postureProgress >= 0.2 ? Math.max(1, Math.ceil(Math.round((1 - this.postureProgress) * POSTURE_RESET_MS) / 1000)) : null,
+      poseJustReset: this.lastPostureResetAt != null && now - this.lastPostureResetAt < 3000,
     }
   }
 
-  // Clear an interrupted sequence without learning a potentially slumped pose.
+  // Clear an interrupted sequence while retaining the current reference.
   reset() {
     this.dippedAt = null
     this.nods = []
@@ -70,6 +76,8 @@ export class HeadNodDetector {
     this.learningProgress = 0
     this.previousSample = null
     this.previousSampleAt = null
+    this.posture = []
+    this.postureProgress = 0
   }
 
   relearn() {
@@ -114,6 +122,39 @@ export class HeadNodDetector {
     }
   }
 
+  private trackNewPosture(sample: MotionSample, sampleMagnitude: number, now: number): boolean {
+    if (!this.neutral || angle(sample, this.neutral) < 4 || now < this.nodCooldownUntil) {
+      this.posture = []
+      this.postureProgress = 0
+      return false
+    }
+    this.posture.push({ sample, magnitude: sampleMagnitude, at: now })
+    this.posture = this.posture.filter((entry) => now - entry.at <= POSTURE_RESET_MS + 500).slice(-1024)
+    const mean = normalize(this.posture.reduce((sum, entry) => ({
+      x: sum.x + entry.sample.x, y: sum.y + entry.sample.y, z: sum.z + entry.sample.z,
+    }), { x: 0, y: 0, z: 0 }))
+    if (!mean) { this.posture = []; this.postureProgress = 0; return false }
+    const rms = Math.sqrt(this.posture.reduce((sum, entry) => sum + angle(entry.sample, mean) ** 2, 0) / this.posture.length)
+    const stable = rms <= 3 && this.posture.every((entry) => angle(entry.sample, mean) <= 8)
+    if (!stable) {
+      this.posture = [{ sample, magnitude: sampleMagnitude, at: now }]
+      this.postureProgress = 0
+      return false
+    }
+    this.postureProgress = Math.min(1, (now - this.posture[0].at) / POSTURE_RESET_MS)
+    if (this.postureProgress < 1 || this.posture.length < MIN_SAMPLES
+      || this.nods.some((time) => now - time <= 8000)
+      || (this.dippedAt != null && now - this.dippedAt <= 3000)) return false
+    const averageMagnitude = this.posture.reduce((sum, entry) => sum + entry.magnitude, 0) / this.posture.length
+    this.reset()
+    this.neutral = mean
+    this.neutralMagnitude = averageMagnitude
+    this.settled = true
+    this.tilt = 0
+    this.lastPostureResetAt = now
+    return true
+  }
+
   update(raw: MotionSample, now: number, enabled = true): boolean {
     const sample = normalize(raw)
     if (!enabled || !sample) {
@@ -150,6 +191,7 @@ export class HeadNodDetector {
     this.tilt = Math.atan2(dot(this.downAxis, cross(neutralPitch, currentPitch)), dot(neutralPitch, currentPitch)) * 180 / Math.PI
     const lateral = (Math.asin(Math.max(-1, Math.min(1, dot(sample, this.downAxis))))
       - Math.asin(Math.max(-1, Math.min(1, dot(this.neutral, this.downAxis))))) * 180 / Math.PI
+    if (this.trackNewPosture(sample, magnitude(raw), now)) return false
     // Follow a gradual incline at <=0.35°/s with a ten-second time constant.
     // Never track a large departure, fast bob, pending nod, or nod cooldown.
     if (elapsedMs > 0 && elapsedMs <= 500 && now >= this.freezeReferenceUntil

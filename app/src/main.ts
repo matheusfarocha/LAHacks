@@ -56,8 +56,12 @@ function updateMotionStatus() {
 
   } else if (current.nodCooldownMs > 0) {
     runtime.setMotionStatus('Nod counted · waiting ' + (current.nodCooldownMs / 1000).toFixed(1) + 's before another nod can count.')
+  } else if (current.poseJustReset) {
+    runtime.setMotionStatus('Pose reset automatically · monitoring from your new posture.')
+  } else if (current.postureCountdownSeconds != null) {
+    runtime.setMotionStatus('New steady posture · resetting reference in ' + current.postureCountdownSeconds + 's. Small movements are OK.')
   } else if (!current.settled) {
-    runtime.setMotionStatus('Return near your learned driving pose to resume monitoring.')
+    runtime.setMotionStatus('Learning your changed posture automatically. Keep a comfortable, fairly steady position.')
   } else {
     runtime.setMotionStatus('Pose set · downward nods only · ' + NOD_COOLDOWN_MS + 'ms pause per nod · gradual pose adjustment active.')
   }
