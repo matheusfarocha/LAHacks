@@ -1,11 +1,13 @@
 {
-  "name": "glass-car-dash-backend",
-  "version": "0.2.0",
+  "name": "glass-car-dash",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
-  "description": "ADB-driven media remote (play/pause/next/previous) for the Glass Car Dash G2 app",
+  "description": "A standalone MPH speed display for Even Realities G2",
   "scripts": {
-    "dev": "node --env-file=.env server.js",
-    "start": "node server.js"
+    "dev": "npm --prefix app run dev",
+    "start": "npm --prefix app run dev",
+    "build": "npm --prefix app run build",
+    "test": "npm --prefix app test"
   }
 }

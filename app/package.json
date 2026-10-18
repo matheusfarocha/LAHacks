@@ -8,7 +8,8 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "pack": "evenhub pack app.json dist -o glass-car-dash.ehpk",
-    "simulate": "evenhub-simulator http://localhost:5173"
+    "simulate": "evenhub-simulator http://localhost:5173",
+    "test": "node --experimental-strip-types test.mts"
   },
   "dependencies": {
     "@evenrealities/even_hub_sdk": "^0.0.11"
