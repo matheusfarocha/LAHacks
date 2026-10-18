@@ -1,0 +1,21 @@
+{
+  "package_id": "com.roadguard.g2.standalone.prototype",
+  "edition": "202601",
+  "name": "RoadGuard Head-Nod Prototype",
+  "tagline": "Experimental head nod alerts and GPS speed",
+  "description": "Standalone G2 research prototype: parked-only head-motion calibration, experimental monitoring for repeated head-nod-like motions, a static warning to stop safely and rest, GPS speed, self-report fatigue check, and break timer. Cannot determine whether a driver is awake; no flashing alarms. May miss drowsiness or issue false alarms. Not a certified driving-safety system. Do not use as a substitute for rest.",
+  "author": "RoadGuard prototype team",
+  "version": "0.2.0",
+  "min_app_version": "2.2.6",
+  "min_sdk_version": "0.0.12",
+  "entrypoint": "index.html",
+  "permissions": [
+    {
+      "name": "location",
+      "desc": "Reads phone GPS speed and optional heading for the simple speed display and detects when the car is stationary."
+    }
+  ],
+  "supported_languages": [
+    "en"
+  ]
+}
